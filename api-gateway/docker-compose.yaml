@@ -1,0 +1,77 @@
+version: "3.9"
+
+services:
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: cargo_auth
+      POSTGRES_USER: cargo
+      POSTGRES_PASSWORD: cargo_dev_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cargo -d cargo_auth"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  auth-service:
+    build:
+      context: ./auth-service
+    ports:
+      - "8081:8081"
+    environment:
+      ENV: development
+      PORT: 8081
+      DATABASE_URL: postgres://cargo:cargo_dev_password@postgres:5432/cargo_auth?sslmode=disable
+      REDIS_URL: redis://redis:6379
+      JWT_PRIVATE_KEY_PATH: /app/keys/private.pem
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./keys:/app/keys:ro
+
+  api-gateway:
+    build:
+      context: ./api-gateway
+    ports:
+      - "8080:8080"
+    environment:
+      ENV: development
+      PORT: 8080
+      REDIS_URL: redis://redis:6379
+      JWT_PUBLIC_KEY_PATH: /app/keys/public.pem
+      AUTH_SERVICE_URL: http://auth-service:8081
+      ORDER_SERVICE_URL: http://order-service:8082
+      SHIPMENT_SERVICE_URL: http://shipment-service:8083
+      ADMIN_SERVICE_URL: http://admin-service:8084
+    depends_on:
+      redis:
+        condition: service_healthy
+      auth-service:
+        condition: service_started
+    volumes:
+      - ./keys:/app/keys:ro
+
+volumes:
+  postgres_data:
+  redis_data:
