@@ -22,14 +22,3 @@ require (
 	golang.org/x/text v0.18.0 // indirect
 )
 
-
-// rate limiting middleware
-// panic recovery middleware
-// graceful shutdown
-// request context/timeouts
-// worker pools/background jobs
-// PostgreSQL swap-in
-// authentication/JWT
-// structured logging
-// caching
-// concurrent job processing

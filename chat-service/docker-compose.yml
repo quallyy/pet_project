@@ -1,0 +1,168 @@
+version: "3.9"
+
+# ─────────────────────────────────────────────────────────────────
+# CARGO PLATFORM — local development stack
+#
+# Ports:
+#   8080 → gateway
+#   8081 → auth-service
+#   8082 → order-service
+#   8083 → chat-service
+#   5432 → postgres
+#   6379 → redis
+#   9092 → kafka (broker, what services connect to)
+#   9093 → kafka (controller, internal only)
+# ─────────────────────────────────────────────────────────────────
+
+services:
+
+  # ── INFRASTRUCTURE ───────────────────────────────────────────────
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: cargo
+      POSTGRES_USER: cargo
+      POSTGRES_PASSWORD: cargo_dev_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      # run all init scripts on first start
+      - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cargo -d cargo"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # Kafka in KRaft mode — no Zookeeper needed
+  # KRaft = Kafka Raft — Kafka manages its own consensus without Zookeeper
+  kafka:
+    image: confluentinc/cp-kafka:7.6.0
+    ports:
+      - "9092:9092"   # what our Go services connect to
+    environment:
+      # KRaft settings — tells Kafka to run without Zookeeper
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller        # this node is both broker and controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093  # cluster of 1 node for local dev
+
+      # listener config — two listeners:
+      #   PLAINTEXT → for our Go services on port 9092
+      #   CONTROLLER → internal Kafka cluster communication on port 9093
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+
+      # topic defaults
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"   # topics created automatically on first publish
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1 # 1 replica — fine for local dev
+      KAFKA_LOG_RETENTION_HOURS: 168            # keep messages for 7 days
+
+      # unique cluster ID — required for KRaft
+      CLUSTER_ID: "MkU3OEVBNTcwNTJENDM2Qk"
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+
+  # ── SERVICES ─────────────────────────────────────────────────────
+
+  auth-service:
+    build:
+      context: ./auth-service
+    ports:
+      - "8081:8081"
+    environment:
+      ENV: development
+      PORT: 8081
+      DATABASE_URL: postgres://cargo:cargo_dev_password@postgres:5432/cargo?sslmode=disable
+      REDIS_URL: redis://redis:6379
+      JWT_PRIVATE_KEY_PATH: /app/keys/private.pem
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./keys:/app/keys:ro
+
+  gateway-service:
+    build:
+      context: ./gateway-service
+    ports:
+      - "8080:8080"
+    environment:
+      ENV: development
+      PORT: 8080
+      REDIS_URL: redis://redis:6379
+      JWT_PUBLIC_KEY_PATH: /app/keys/public.pem
+      AUTH_SERVICE_URL: http://auth-service:8081
+      ORDER_SERVICE_URL: http://order-service:8082
+      CHAT_SERVICE_URL: http://chat-service:8083
+    depends_on:
+      redis:
+        condition: service_healthy
+      auth-service:
+        condition: service_started
+    volumes:
+      - ./keys:/app/keys:ro
+
+  order-service:
+    build:
+      context: ./order-service
+    ports:
+      - "8082:8082"
+    environment:
+      ENV: development
+      PORT: 8082
+      DATABASE_URL: postgres://cargo:cargo_dev_password@postgres:5432/cargo?sslmode=disable
+      KAFKA_BROKERS: kafka:9092
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+
+  chat-service:
+    build:
+      context: ./chat-service
+    ports:
+      - "8083:8083"
+    environment:
+      ENV: development
+      PORT: 8083
+      DATABASE_URL: postgres://cargo:cargo_dev_password@postgres:5432/cargo?sslmode=disable
+      REDIS_URL: redis://redis:6379
+      KAFKA_BROKERS: kafka:9092
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
+  redis_data:
+  kafka_data:
